@@ -106,5 +106,5 @@ jobs:
           fi
 
           gh release create "$TAG" "$ASSET" \
-            --title "vectorCraft Skills $TAG" \
+            --title "vectorcraft skills $TAG" \
             --notes "Released from commit $GITHUB_SHA."
