@@ -1,0 +1,110 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "skills/**"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-skills
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Test and release skills
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Determine release version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          latest_tag=""
+          while IFS= read -r candidate; do
+            if [[ "$candidate" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+              latest_tag="$candidate"
+              break
+            fi
+          done < <(git tag --list --sort=-version:refname)
+
+          if [[ -z "$latest_tag" ]]; then
+            next_tag="v1.0.0"
+          else
+            version="${latest_tag#v}"
+            IFS='.' read -r major minor patch <<< "$version"
+            next_tag="v${major}.${minor}.$((patch + 1))"
+          fi
+
+          echo "tag=$next_tag" >> "$GITHUB_OUTPUT"
+          echo "asset=vectorcraft-skills-${next_tag}.zip" >> "$GITHUB_OUTPUT"
+
+      - name: Create skills archive
+        shell: bash
+        env:
+          ASSET: ${{ steps.version.outputs.asset }}
+        run: |
+          set -euo pipefail
+
+          symlink="$(find skills -type l -print -quit)"
+          if [[ -n "$symlink" ]]; then
+            echo "Refusing to archive skills: symbolic links are not allowed." >&2
+            exit 1
+          fi
+
+          zip -r "$ASSET" skills
+
+      - name: Create and verify release tag
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f "ref=refs/tags/$TAG" \
+            -f "sha=$GITHUB_SHA"
+
+          tag_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq '.object.sha')"
+          if [[ "$tag_sha" != "$GITHUB_SHA" ]]; then
+            echo "Release tag $TAG points to $tag_sha, expected $GITHUB_SHA." >&2
+            exit 1
+          fi
+
+      - name: Create GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          ASSET: ${{ steps.version.outputs.asset }}
+        run: |
+          set -euo pipefail
+
+          tag_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq '.object.sha')"
+          if [[ "$tag_sha" != "$GITHUB_SHA" ]]; then
+            echo "Refusing to publish: release tag $TAG points to $tag_sha, expected $GITHUB_SHA." >&2
+            exit 1
+          fi
+
+          gh release create "$TAG" "$ASSET" \
+            --title "vectorCraft Skills $TAG" \
+            --notes "Released from commit $GITHUB_SHA."
